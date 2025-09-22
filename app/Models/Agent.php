@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
@@ -43,6 +44,15 @@ class Agent extends Model
 
     public function whatsappUser()
     {
-        return $this->hasOne(WhatsappUser::class, 'agent_id', 'id');
+        return $this->hasOne(WhatsappUser::class, 'agent_id', 'id_text');
+    }
+
+    protected function idText(): Attribute
+    {
+        return Attribute::make(
+            get: fn ($value, array $attributes) => isset($attributes[$this->getKeyName()])
+                ? (string) $attributes[$this->getKeyName()]
+                : null,
+        );
     }
 }

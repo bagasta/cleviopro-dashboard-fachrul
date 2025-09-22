@@ -15,7 +15,7 @@ class WhatsappSessionStatus extends Model
 
     public $incrementing = false;
 
-    protected $keyType = 'int';
+    protected $keyType = 'string';
 
     public $timestamps = false;
 
@@ -28,7 +28,6 @@ class WhatsappSessionStatus extends Model
     ];
 
     protected $casts = [
-        'agent_id' => 'int',
         'last_connected_at' => 'datetime',
         'last_disconnected_at' => 'datetime',
         'updated_at' => 'datetime',

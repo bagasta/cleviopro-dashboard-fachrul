@@ -24,7 +24,6 @@ class WhatsappUser extends Model
 
     protected $casts = [
         'user_id' => 'int',
-        'agent_id' => 'int',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
         'last_connected_at' => 'datetime',
