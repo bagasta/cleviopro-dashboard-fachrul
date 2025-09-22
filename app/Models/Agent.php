@@ -40,4 +40,9 @@ class Agent extends Model
     {
         return $this->hasMany(Channel::class);
     }
+
+    public function whatsappUser()
+    {
+        return $this->hasOne(WhatsappUser::class, 'agent_id', 'id');
+    }
 }

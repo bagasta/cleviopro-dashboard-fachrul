@@ -9,8 +9,8 @@ class DashboardController extends Controller
 {
     public function index(Request $request): View
     {
-        $user = $request->user()->load('agents');
-        $agents = $user->agents()->latest()->get();
+        $user = $request->user();
+        $agents = $user->agents()->latest()->with('whatsappUser')->get();
         
         $apiKey = $user->apiKeys()
             ->where('active', true)
