@@ -38,10 +38,6 @@ class RegisteredUserController extends Controller
 
         $hash = Hash::make($validated['password'], ['rounds' => 12]);
 
-        if (str_starts_with($hash, '$2y$')) {
-            $hash = '$2b$'.substr($hash, 4);
-        }
-
         $username = trim($validated['nama']);
         $phoneNumber = trim($validated['phone_number']);
 
