@@ -36,8 +36,9 @@ const bubbleClasses = {
 };
 
 const knowledgeMessages = {
-    chooseFile: 'Please choose a file to upload.',
-    invalidFile: 'Only .pdf, .docx, .ppt, or .pptx files are allowed.',
+    chooseFile: 'Please choose at least one file to upload.',
+    invalidFile: 'Only .pdf, .doc, .docx, .odt, .ppt, .pptx, or .odp files are allowed.',
+    fileLimit: 'You can upload up to 20 files at once.',
     modalTitle: 'Add Knowledge',
     modalDescriptionPrefix: 'Upload relevant documents to extend the knowledge base for',
     uploading: 'Uploading...',
@@ -310,27 +311,44 @@ const initAgentKnowledge = () => {
         resetModal();
     };
 
-    const allowedExtensions = ['pdf', 'docx', 'ppt', 'pptx'];
+    const allowedExtensions = ['pdf', 'doc', 'docx', 'odt', 'ppt', 'pptx', 'odp'];
     const allowedMime = [
         'application/pdf',
+        'application/msword',
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/vnd.oasis.opendocument.text',
         'application/vnd.ms-powerpoint',
         'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'application/vnd.oasis.opendocument.presentation',
     ];
 
-    const validateFile = (file) => {
-        if (!file) {
+    const validateFiles = (files) => {
+        if (!files || files.length === 0) {
             errorEl.textContent = knowledgeMessages.chooseFile;
             errorEl.classList.remove('hidden');
             return false;
         }
 
-        const ext = file.name.split('.').pop()?.toLowerCase();
-        const mimeAllowed = allowedMime.includes(file.type) || file.type === '';
-        if (!allowedExtensions.includes(ext) || (!mimeAllowed && ext === 'pdf')) {
-            errorEl.textContent = knowledgeMessages.invalidFile;
+        if (files.length > 20) {
+            errorEl.textContent = knowledgeMessages.fileLimit;
             errorEl.classList.remove('hidden');
             return false;
+        }
+
+        for (const file of files) {
+            const ext = file.name.split('.').pop()?.toLowerCase();
+
+            if (!ext || !allowedExtensions.includes(ext)) {
+                errorEl.textContent = knowledgeMessages.invalidFile;
+                errorEl.classList.remove('hidden');
+                return false;
+            }
+
+            if (file.type && !allowedMime.includes(file.type)) {
+                errorEl.textContent = knowledgeMessages.invalidFile;
+                errorEl.classList.remove('hidden');
+                return false;
+            }
         }
 
         errorEl.classList.add('hidden');
@@ -358,14 +376,16 @@ const initAgentKnowledge = () => {
 
     const submitKnowledge = async (event) => {
         event.preventDefault();
-        const file = fileInput.files?.[0] ?? null;
+        const files = Array.from(fileInput.files ?? []);
 
-        if (!validateFile(file) || !endpoint) {
+        if (!validateFiles(files) || !endpoint) {
             return;
         }
 
         const formData = new FormData();
-        formData.append('file', file);
+        files.forEach((file) => {
+            formData.append('files[]', file);
+        });
 
         const originalLabel = submitBtn.textContent;
         submitBtn.disabled = true;

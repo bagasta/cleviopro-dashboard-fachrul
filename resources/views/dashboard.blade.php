@@ -193,8 +193,8 @@
                 @csrf
                 <div>
                     <label for="agent-knowledge-file" class="block text-xs font-semibold text-gray-600 uppercase tracking-wide">{{ __('Knowledge File') }}</label>
-                    <input id="agent-knowledge-file" name="file" type="file" accept=".pdf,.docx,.ppt,.pptx" class="mt-1 block w-full text-sm text-gray-700 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500" required>
-                    <p class="mt-1 text-xs text-gray-500">{{ __('Accepted formats: .pdf, .docx, .ppt, .pptx (max 20 MB).') }}</p>
+                    <input id="agent-knowledge-file" name="files[]" type="file" accept=".pdf,.doc,.docx,.odt,.ppt,.pptx,.odp" class="mt-1 block w-full text-sm text-gray-700 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500" multiple required>
+                    <p class="mt-1 text-xs text-gray-500">{{ __('Accepted formats: .pdf, .doc, .docx, .odt, .ppt, .pptx, .odp (max 20 MB per file, up to 20 files).') }}</p>
                     <p class="mt-2 text-xs text-red-600 hidden" id="agent-knowledge-error"></p>
                 </div>
                 <div class="text-sm text-gray-600" id="agent-knowledge-status"></div>

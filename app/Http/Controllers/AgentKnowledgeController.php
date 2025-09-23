@@ -19,50 +19,53 @@ class AgentKnowledgeController extends Controller
         $this->ensureOwnership($request, $agent);
 
         $validated = $request->validate([
-            'file' => ['required', 'file', 'mimes:pdf,docx,ppt,pptx', 'max:20480'],
+            'files' => ['required', 'array', 'max:20'],
+            'files.*' => ['file', 'mimes:pdf,doc,docx,odt,ppt,pptx,odp', 'max:20480'],
         ]);
 
-        $uploadedFile = $validated['file'];
-        $uuid = (string) Str::uuid();
-        $workingDir = "tmp/agent-knowledge/{$uuid}";
-        Storage::makeDirectory($workingDir);
+        foreach ($validated['files'] as $uploadedFile) {
+            $uuid = (string) Str::uuid();
+            $workingDir = "tmp/agent-knowledge/{$uuid}";
+            Storage::makeDirectory($workingDir);
 
-        $extension = strtolower($uploadedFile->getClientOriginalExtension() ?: $uploadedFile->extension());
-        $sourceName = 'source.'.$extension;
-        $storedRelativePath = $uploadedFile->storeAs($workingDir, $sourceName);
-        $sourcePath = Storage::path($storedRelativePath);
+            $extension = strtolower($uploadedFile->getClientOriginalExtension() ?: $uploadedFile->extension());
+            $sourceName = 'source.'.$extension;
+            $storedRelativePath = $uploadedFile->storeAs($workingDir, $sourceName);
+            $sourcePath = Storage::path($storedRelativePath);
+            $stream = null;
 
-        try {
-            $pdfPath = $extension === 'pdf'
-                ? $sourcePath
-                : $this->convertToPdf($sourcePath);
+            try {
+                $pdfPath = $extension === 'pdf'
+                    ? $sourcePath
+                    : $this->convertToPdf($sourcePath);
 
-            $stream = fopen($pdfPath, 'r');
+                $stream = fopen($pdfPath, 'r');
 
-            $response = Http::timeout(120)
-                ->attach('file', $stream, basename($pdfPath))
-                ->post(self::UPLOAD_ENDPOINT, [
-                    'UserId' => (string) $request->user()->id,
-                    'AgentId' => (string) $agent->id,
-                ]);
+                $response = Http::timeout(120)
+                    ->attach('file', $stream, basename($pdfPath))
+                    ->post(self::UPLOAD_ENDPOINT, [
+                        'UserId' => (string) $request->user()->id,
+                        'AgentId' => (string) $agent->id,
+                    ]);
 
-            if (is_resource($stream)) {
-                fclose($stream);
+                if ($response->failed()) {
+                    return response()->json([
+                        'message' => 'Unable to upload knowledge base file.',
+                        'details' => $response->json(),
+                    ], $response->status() ?: 500);
+                }
+            } finally {
+                if (is_resource($stream)) {
+                    fclose($stream);
+                }
+
+                Storage::deleteDirectory($workingDir);
             }
-
-            if ($response->failed()) {
-                return response()->json([
-                    'message' => 'Unable to upload knowledge base file.',
-                    'details' => $response->json(),
-                ], $response->status() ?: 500);
-            }
-
-            return response()->json([
-                'message' => 'Knowledge uploaded successfully.',
-            ]);
-        } finally {
-            Storage::deleteDirectory($workingDir);
         }
+
+        return response()->json([
+            'message' => 'Knowledge uploaded successfully.',
+        ]);
     }
 
     private function convertToPdf(string $sourcePath): string
