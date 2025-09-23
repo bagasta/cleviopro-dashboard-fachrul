@@ -141,7 +141,7 @@ class AgentKnowledgeController extends Controller
             ? new Process(['where', $command])
             : new Process(['which', $command]);
 
-        $process->setTimeout(5);
+        $process->setTimeout(120);
         $process->run();
 
         return $process->isSuccessful();

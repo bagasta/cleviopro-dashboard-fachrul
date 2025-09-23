@@ -45,7 +45,7 @@ class AgentConnectionController extends Controller
 
     private function forwardRequest(string $method, string $url, ?array $payload = null): JsonResponse
     {
-        $request = Http::timeout(60)
+        $request = Http::timeout(120)
             ->withHeaders(['Content-Type' => 'application/json']);
 
         $response = match (strtoupper($method)) {

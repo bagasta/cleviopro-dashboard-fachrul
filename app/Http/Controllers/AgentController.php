@@ -319,7 +319,7 @@ class AgentController extends Controller
     private function warmAgentSilently(int $agentId, int $userId): void
     {
         try {
-            Http::timeout(3)          // kecil agar view tidak nunggu lama
+            Http::timeout(10)          // kecil agar view tidak nunggu lama
                 ->asJson()
                 // ->withToken(config('services.langchain.token')) // aktifkan jika endpoint butuh auth
                 ->post("https://langchain.chiefaiofficer.id/agents/{$agentId}/warm", [
