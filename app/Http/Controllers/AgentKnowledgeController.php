@@ -23,73 +23,116 @@ class AgentKnowledgeController extends Controller
 
         $files = $this->validatedUploads($request);
 
+        $preparedFiles = [];
+
         foreach ($files as $uploadedFile) {
             $uuid = (string) Str::uuid();
             $workingDir = "tmp/agent-knowledge/{$uuid}";
             Storage::makeDirectory($workingDir);
 
-            $extension = strtolower($uploadedFile->getClientOriginalExtension() ?: $uploadedFile->extension());
-            $originalClientName = trim($uploadedFile->getClientOriginalName());
-            $originalBaseName = pathinfo($originalClientName, PATHINFO_FILENAME) ?: 'document';
-            $normalizedBaseName = Str::slug($originalBaseName) ?: 'document';
-
-            $sourceName = $normalizedBaseName.'.'.$extension;
-            $storedRelativePath = $uploadedFile->storeAs($workingDir, $sourceName);
-            $sourcePath = Storage::path($storedRelativePath);
-            $stream = null;
-
             try {
+                $extension = strtolower($uploadedFile->getClientOriginalExtension() ?: $uploadedFile->extension());
+                $originalClientName = trim($uploadedFile->getClientOriginalName());
+                $originalBaseName = pathinfo($originalClientName, PATHINFO_FILENAME) ?: 'document';
+                $normalizedBaseName = Str::slug($originalBaseName) ?: 'document';
+
+                $sourceName = $normalizedBaseName.'.'.$extension;
+                $storedRelativePath = $uploadedFile->storeAs($workingDir, $sourceName);
+                $sourcePath = Storage::path($storedRelativePath);
+
                 $pdfPath = $extension === 'pdf'
                     ? $sourcePath
                     : $this->convertToPdf($sourcePath);
-
-                $stream = fopen($pdfPath, 'r');
 
                 $uploadFilename = $extension === 'pdf'
                     ? ($originalClientName !== '' ? $originalClientName : $sourceName)
                     : ($originalBaseName !== '' ? $originalBaseName.'.pdf' : 'document.pdf');
 
-                Log::info('Uploading knowledge file to n8n.', [
-                    'agent_id' => $agent->id,
-                    'user_id' => $request->user()->id,
-                    'original_filename' => $originalClientName ?: $uploadedFile->getClientOriginalName(),
+                $preparedFiles[] = [
+                    'original_filename' => $originalClientName !== '' ? $originalClientName : $uploadedFile->getClientOriginalName(),
                     'sent_filename' => $uploadFilename,
-                ]);
+                    'pdf_path' => $pdfPath,
+                    'working_dir' => $workingDir,
+                ];
+            } catch (\Throwable $exception) {
+                Storage::deleteDirectory($workingDir);
 
-                $response = Http::timeout(120)
-                    ->attach('file', $stream, $uploadFilename)
-                    ->post(self::UPLOAD_ENDPOINT, [
-                        'UserId' => (string) $request->user()->id,
-                        'AgentId' => (string) $agent->id,
-                    ]);
+                throw $exception;
+            }
+        }
 
-                if ($response->failed()) {
-                    Log::warning('Knowledge upload failed.', [
-                        'agent_id' => $agent->id,
-                        'user_id' => $request->user()->id,
-                        'sent_filename' => $uploadFilename,
-                        'status' => $response->status(),
-                        'response_body' => $response->body(),
-                    ]);
+        $streams = [];
 
-                    return response()->json([
-                        'message' => 'Unable to upload knowledge base file.',
-                        'details' => $response->json(),
-                    ], $response->status() ?: 500);
+        try {
+            $pendingRequest = Http::timeout(120);
+
+            foreach ($preparedFiles as $fileMeta) {
+                $stream = fopen($fileMeta['pdf_path'], 'r');
+
+                if ($stream === false) {
+                    throw new \RuntimeException(sprintf('Unable to open file stream for %s.', $fileMeta['pdf_path']));
                 }
 
-                Log::info('Knowledge upload succeeded.', [
+                $streams[] = $stream;
+
+                $pendingRequest = $pendingRequest->attach(
+                    'files[]',
+                    $stream,
+                    $fileMeta['sent_filename']
+                );
+            }
+
+            $filesPayload = array_map(static function (array $fileMeta): array {
+                return [
+                    'original_filename' => $fileMeta['original_filename'],
+                    'sent_filename' => $fileMeta['sent_filename'],
+                ];
+            }, $preparedFiles);
+
+            Log::info('Uploading knowledge files to n8n.', [
+                'agent_id' => $agent->id,
+                'user_id' => $request->user()->id,
+                'file_count' => count($filesPayload),
+                'files' => $filesPayload,
+            ]);
+
+            $response = $pendingRequest->post(self::UPLOAD_ENDPOINT, [
+                'UserId' => (string) $request->user()->id,
+                'AgentId' => (string) $agent->id,
+            ]);
+
+            if ($response->failed()) {
+                Log::warning('Knowledge upload failed.', [
                     'agent_id' => $agent->id,
                     'user_id' => $request->user()->id,
-                    'sent_filename' => $uploadFilename,
+                    'file_count' => count($filesPayload),
+                    'files' => $filesPayload,
                     'status' => $response->status(),
+                    'response_body' => $response->body(),
                 ]);
-            } finally {
+
+                return response()->json([
+                    'message' => 'Unable to upload knowledge base file.',
+                    'details' => $response->json(),
+                ], $response->status() ?: 500);
+            }
+
+            Log::info('Knowledge upload succeeded.', [
+                'agent_id' => $agent->id,
+                'user_id' => $request->user()->id,
+                'file_count' => count($filesPayload),
+                'files' => $filesPayload,
+                'status' => $response->status(),
+            ]);
+        } finally {
+            foreach ($streams as $stream) {
                 if (is_resource($stream)) {
                     fclose($stream);
                 }
+            }
 
-                Storage::deleteDirectory($workingDir);
+            foreach ($preparedFiles as $fileMeta) {
+                Storage::deleteDirectory($fileMeta['working_dir']);
             }
         }
 
