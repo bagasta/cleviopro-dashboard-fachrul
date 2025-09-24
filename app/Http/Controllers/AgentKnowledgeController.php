@@ -20,6 +20,7 @@ class AgentKnowledgeController extends Controller
     {
         $this->ensureOwnership($request, $agent);
 
+<<<<<<< HEAD
         $validated = Validator::make([
             'files' => $this->normalizeUploadedFiles($request->file('files')),
         ], [
@@ -52,6 +53,42 @@ class AgentKnowledgeController extends Controller
                         'AgentId' => (string) $agent->id,
                     ]);
 
+=======
+        $files = $this->gatherUploadedFiles($request);
+
+        $validated = Validator::make([
+            'files' => $files,
+        ], [
+            'files' => ['required', 'array', 'min:1', 'max:20'],
+            'files.*' => ['file', 'mimes:pdf,doc,docx,odt,ppt,pptx,odp', 'max:20480'],
+        ])->validate();
+
+        foreach ($validated['files'] as $uploadedFile) {
+            $uuid = (string) Str::uuid();
+            $workingDir = "tmp/agent-knowledge/{$uuid}";
+            Storage::makeDirectory($workingDir);
+
+            $extension = strtolower($uploadedFile->getClientOriginalExtension() ?: $uploadedFile->extension());
+            $sourceName = 'source.'.$extension;
+            $storedRelativePath = $uploadedFile->storeAs($workingDir, $sourceName);
+            $sourcePath = Storage::path($storedRelativePath);
+            $stream = null;
+
+            try {
+                $pdfPath = $extension === 'pdf'
+                    ? $sourcePath
+                    : $this->convertToPdf($sourcePath);
+
+                $stream = fopen($pdfPath, 'r');
+
+                $response = Http::timeout(120)
+                    ->attach('file', $stream, basename($pdfPath))
+                    ->post(self::UPLOAD_ENDPOINT, [
+                        'UserId' => (string) $request->user()->id,
+                        'AgentId' => (string) $agent->id,
+                    ]);
+
+>>>>>>> origin/codex/analyze-project-and-provide-explanation-bd23od
                 if ($response->failed()) {
                     return response()->json([
                         'message' => 'Unable to upload knowledge base file.',
@@ -73,7 +110,11 @@ class AgentKnowledgeController extends Controller
     }
 
     /**
+<<<<<<< HEAD
      * @param  array<int, UploadedFile|null>|UploadedFile|null  $files
+=======
+     * @param  array<int|string, UploadedFile|array|null>|UploadedFile|null  $files
+>>>>>>> origin/codex/analyze-project-and-provide-explanation-bd23od
      * @return array<int, UploadedFile>
      */
     private function normalizeUploadedFiles(null|UploadedFile|array $files): array
@@ -82,11 +123,59 @@ class AgentKnowledgeController extends Controller
             return [];
         }
 
+<<<<<<< HEAD
         if (! is_array($files)) {
             $files = [$files];
         }
 
         return array_values(array_filter($files, static fn ($file) => $file instanceof UploadedFile));
+=======
+        if ($files instanceof UploadedFile) {
+            return [$files];
+        }
+
+        $normalized = [];
+
+        foreach ($files as $file) {
+            if ($file instanceof UploadedFile) {
+                $normalized[] = $file;
+                continue;
+            }
+
+            if (is_array($file)) {
+                $normalized = array_merge($normalized, $this->normalizeUploadedFiles($file));
+            }
+        }
+
+        return array_values($normalized);
+    }
+
+    private function gatherUploadedFiles(Request $request): array
+    {
+        $candidates = [
+            $request->file('files'),
+            $request->file('file'),
+            data_get($request->allFiles(), 'files'),
+        ];
+
+        $collected = [];
+        $seen = [];
+
+        foreach ($candidates as $candidate) {
+            foreach ($this->normalizeUploadedFiles($candidate) as $file) {
+                $hash = spl_object_hash($file);
+
+                if (isset($seen[$hash])) {
+                    continue;
+                }
+
+                $seen[$hash] = true;
+                $collected[] = $file;
+            }
+        }
+
+        return $collected;
+>>>>>>> origin/codex/analyze-project-and-provide-explanation-bd23od
     }
 
     private function convertToPdf(string $sourcePath): string
