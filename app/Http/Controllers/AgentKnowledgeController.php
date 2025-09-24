@@ -11,7 +11,6 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use Symfony\Component\Process\Process;
-use Illuminate\Support\Facades\Log;
 
 class AgentKnowledgeController extends Controller
 {
@@ -29,7 +28,7 @@ class AgentKnowledgeController extends Controller
             'files' => ['required', 'array', 'min:1', 'max:20'],
             'files.*' => ['file', 'mimes:pdf,doc,docx,odt,ppt,pptx,odp', 'max:20480'],
         ])->validate();
-        \Log::info('files_received_count', ['count' => count($validated['files'])]);
+
         foreach ($validated['files'] as $uploadedFile) {
             $uuid = (string) Str::uuid();
             $workingDir = "tmp/agent-knowledge/{$uuid}";
@@ -47,18 +46,19 @@ class AgentKnowledgeController extends Controller
                     : $this->convertToPdf($sourcePath);
 
                 $stream = fopen($pdfPath, 'r');
-                Log::info('n8n_post_start', ['i' => $i, 'name' => $uploadedFile->getClientOriginalName()]);
+
                 $response = Http::timeout(120)
                     ->attach('file', $stream, basename($pdfPath))
                     ->post(self::UPLOAD_ENDPOINT, [
                         'UserId' => (string) $request->user()->id,
                         'AgentId' => (string) $agent->id,
                     ]);
-                \Log::info('n8n_post_done', ['i' => $i, 'status' => $response->status(), 'ok' => $response->ok()]);
+
                 if ($response->failed()) {
-                    // simpan info error, jangan langsung return biar file lain tetap dikirim
-                    $errors[] = ['i' => $i, 'status' => $response->status(), 'body' => $response->body()];
-                    continue;
+                    return response()->json([
+                        'message' => 'Unable to upload knowledge base file.',
+                        'details' => $response->json(),
+                    ], $response->status() ?: 500);
                 }
             } finally {
                 if (is_resource($stream)) {
@@ -67,9 +67,6 @@ class AgentKnowledgeController extends Controller
 
                 Storage::deleteDirectory($workingDir);
             }
-        }
-        if (!empty($errors)) {
-    return response()->json(['message' => 'Some files failed to upload.', 'errors' => $errors], 207);
         }
 
         return response()->json([
