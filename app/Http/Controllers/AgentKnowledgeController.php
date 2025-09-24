@@ -5,11 +5,9 @@ namespace App\Http\Controllers;
 use App\Models\Agent;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use Symfony\Component\Process\Process;
 
@@ -21,34 +19,30 @@ class AgentKnowledgeController extends Controller
     {
         $this->ensureOwnership($request, $agent);
 
-        $files = $this->gatherUploadedFiles($request);
-        $shouldNumberFiles = count($files) > 1;
-
-        $validated = Validator::make([
-            'files' => $files,
-        ], [
-            'files' => ['required', 'array', 'min:1', 'max:20'],
+        $validated = $request->validate([
+            'files' => ['required', 'array', 'max:20'],
             'files.*' => ['file', 'mimes:pdf,doc,docx,odt,ppt,pptx,odp', 'max:20480'],
-        ])->validate();
+        ]);
 
-        $normalizedFiles = array_values($validated['files']);
-
-        foreach ($normalizedFiles as $index => $uploadedFile) {
+        foreach ($validated['files'] as $uploadedFile) {
             $uuid = (string) Str::uuid();
             $workingDir = "tmp/agent-knowledge/{$uuid}";
             Storage::makeDirectory($workingDir);
 
             $extension = strtolower($uploadedFile->getClientOriginalExtension() ?: $uploadedFile->extension());
-            $sourceName = 'source.'.$extension;
+            $originalClientName = trim($uploadedFile->getClientOriginalName());
+            $originalBaseName = pathinfo($originalClientName, PATHINFO_FILENAME) ?: 'document';
+            $normalizedBaseName = Str::slug($originalBaseName) ?: 'document';
+
+            $sourceName = $normalizedBaseName.'.'.$extension;
             $storedRelativePath = $uploadedFile->storeAs($workingDir, $sourceName);
             $sourcePath = Storage::path($storedRelativePath);
-            $finalPdfName = $baseName.'.pdf';
-            $finalPdfPath = dirname($sourcePath).DIRECTORY_SEPARATOR.$finalPdfName;
+            $stream = null;
 
             try {
                 $pdfPath = $extension === 'pdf'
-                    ? $this->ensurePdfName($sourcePath, $finalPdfPath)
-                    : $this->convertToPdf($sourcePath, $finalPdfPath);
+                    ? $sourcePath
+                    : $this->convertToPdf($sourcePath);
 
                 $stream = fopen($pdfPath, 'r');
 
@@ -64,7 +58,7 @@ class AgentKnowledgeController extends Controller
                 ]);
 
                 $response = Http::timeout(120)
-                    ->attach('file', $stream, basename($pdfPath))
+                    ->attach('file', $stream, $uploadFilename)
                     ->post(self::UPLOAD_ENDPOINT, [
                         'UserId' => (string) $request->user()->id,
                         'AgentId' => (string) $agent->id,
@@ -92,6 +86,10 @@ class AgentKnowledgeController extends Controller
                     'status' => $response->status(),
                 ]);
             } finally {
+                if (is_resource($stream)) {
+                    fclose($stream);
+                }
+
                 Storage::deleteDirectory($workingDir);
             }
         }
@@ -101,77 +99,7 @@ class AgentKnowledgeController extends Controller
         ]);
     }
 
-    /**
-     * @param  array<int|string, UploadedFile|array|null>|UploadedFile|null  $files
-     * @return array<int, UploadedFile>
-     */
-    private function normalizeUploadedFiles(null|UploadedFile|array $files): array
-    {
-        if ($files === null) {
-            return [];
-        }
-
-        if ($files instanceof UploadedFile) {
-            return [$files];
-        }
-
-        $normalized = [];
-
-        foreach ($files as $file) {
-            if ($file instanceof UploadedFile) {
-                $normalized[] = $file;
-                continue;
-            }
-
-            if (is_array($file)) {
-                $normalized = array_merge($normalized, $this->normalizeUploadedFiles($file));
-            }
-        }
-
-        return array_values($normalized);
-    }
-
-    private function gatherUploadedFiles(Request $request): array
-    {
-        $candidates = [
-            $request->file('files'),
-            $request->file('file'),
-            data_get($request->allFiles(), 'files'),
-        ];
-
-        $collected = [];
-        $seen = [];
-
-        foreach ($candidates as $candidate) {
-            foreach ($this->normalizeUploadedFiles($candidate) as $file) {
-                $hash = spl_object_hash($file);
-
-                if (isset($seen[$hash])) {
-                    continue;
-                }
-
-                $seen[$hash] = true;
-                $collected[] = $file;
-            }
-        }
-
-        return $collected;
-    }
-
-    private function ensurePdfName(string $sourcePath, string $desiredPdfPath): string
-    {
-        if (basename($sourcePath) === basename($desiredPdfPath)) {
-            return $sourcePath;
-        }
-
-        if (! rename($sourcePath, $desiredPdfPath)) {
-            throw new \RuntimeException('Unable to rename the uploaded PDF file.');
-        }
-
-        return $desiredPdfPath;
-    }
-
-    private function convertToPdf(string $sourcePath, string $desiredPdfPath): string
+    private function convertToPdf(string $sourcePath): string
     {
         $outputDir = dirname($sourcePath);
         $binary = $this->resolveLibreOfficeBinary();
@@ -206,12 +134,7 @@ class AgentKnowledgeController extends Controller
             throw new \RuntimeException('Converted PDF file could not be located.');
         }
 
-        if (basename($pdfPath) !== basename($desiredPdfPath) && ! rename($pdfPath, $desiredPdfPath)) {
-            throw new \RuntimeException('Unable to rename the converted PDF file.');
-        }
-
-        return $desiredPdfPath;
-
+        return $pdfPath;
     }
 
     private function resolveLibreOfficeBinary(): string
@@ -265,5 +188,4 @@ class AgentKnowledgeController extends Controller
         }
     }
 }
-
 
