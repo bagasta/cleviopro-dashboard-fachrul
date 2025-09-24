@@ -29,13 +29,18 @@ class AgentKnowledgeController extends Controller
             'files.*' => ['file', 'mimes:pdf,doc,docx,odt,ppt,pptx,odp', 'max:20480'],
         ])->validate();
 
-        foreach ($validated['files'] as $uploadedFile) {
+        $totalFiles = count($validated['files']);
+
+        foreach ($validated['files'] as $index => $uploadedFile) {
             $uuid = (string) Str::uuid();
             $workingDir = "tmp/agent-knowledge/{$uuid}";
             Storage::makeDirectory($workingDir);
 
             $extension = strtolower($uploadedFile->getClientOriginalExtension() ?: $uploadedFile->extension());
-            $sourceName = 'source.'.$extension;
+            $baseName = $totalFiles > 1
+                ? 'source'.($index + 1)
+                : 'source';
+            $sourceName = $baseName.'.'.$extension;
             $storedRelativePath = $uploadedFile->storeAs($workingDir, $sourceName);
             $sourcePath = Storage::path($storedRelativePath);
             $stream = null;
