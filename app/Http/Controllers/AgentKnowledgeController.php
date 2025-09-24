@@ -65,21 +65,20 @@ class AgentKnowledgeController extends Controller
 
         try {
             $pendingRequest = Http::timeout(120);
-
+            $idx = 1;
             foreach ($preparedFiles as $fileMeta) {
                 $stream = fopen($fileMeta['pdf_path'], 'r');
-
                 if ($stream === false) {
                     throw new \RuntimeException(sprintf('Unable to open file stream for %s.', $fileMeta['pdf_path']));
                 }
-
                 $streams[] = $stream;
 
                 $pendingRequest = $pendingRequest->attach(
-                    'files[]',
+                    "file{$idx}",              // file1, file2, ...
                     $stream,
                     $fileMeta['sent_filename']
                 );
+                $idx++;
             }
 
             $filesPayload = array_map(static function (array $fileMeta): array {
