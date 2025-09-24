@@ -58,6 +58,12 @@ class AgentKnowledgeController extends Controller
                         'UserId' => (string) $request->user()->id,
                         'AgentId' => (string) $agent->id,
                     ]);
+                    \Log::info('n8n upload', [
+                    'index' => $index + 1,
+                    'sent'  => basename($pdfPath),
+                    'status'=> $response->status(),
+                    'ok'    => $response->ok(),
+                ]);
 
                 if ($response->failed()) {
                     return response()->json([
