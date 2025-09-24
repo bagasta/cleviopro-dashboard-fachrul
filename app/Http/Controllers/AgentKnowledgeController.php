@@ -66,7 +66,7 @@ class AgentKnowledgeController extends Controller
         try {
             $pendingRequest = Http::timeout(120);
 
-            foreach ($preparedFiles as $fileMeta) {
+            foreach ($preparedFiles as $index => $fileMeta) {
                 $stream = fopen($fileMeta['pdf_path'], 'r');
 
                 if ($stream === false) {
@@ -76,7 +76,7 @@ class AgentKnowledgeController extends Controller
                 $streams[] = $stream;
 
                 $pendingRequest = $pendingRequest->attach(
-                    'files[]',
+                    sprintf('files[%d]', $index),
                     $stream,
                     $fileMeta['sent_filename']
                 );
