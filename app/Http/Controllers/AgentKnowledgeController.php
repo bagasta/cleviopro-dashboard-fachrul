@@ -11,6 +11,8 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use Symfony\Component\Process\Process;
+use Illuminate\Support\Facades\Log;
+
 
 class AgentKnowledgeController extends Controller
 {
