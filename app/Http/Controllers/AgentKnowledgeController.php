@@ -6,6 +6,7 @@ use App\Models\Agent;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Symfony\Component\Process\Process;
@@ -29,7 +30,11 @@ class AgentKnowledgeController extends Controller
             Storage::makeDirectory($workingDir);
 
             $extension = strtolower($uploadedFile->getClientOriginalExtension() ?: $uploadedFile->extension());
-            $sourceName = 'source.'.$extension;
+            $originalClientName = trim($uploadedFile->getClientOriginalName());
+            $originalBaseName = pathinfo($originalClientName, PATHINFO_FILENAME) ?: 'document';
+            $normalizedBaseName = Str::slug($originalBaseName) ?: 'document';
+
+            $sourceName = $normalizedBaseName.'.'.$extension;
             $storedRelativePath = $uploadedFile->storeAs($workingDir, $sourceName);
             $sourcePath = Storage::path($storedRelativePath);
             $stream = null;
@@ -41,19 +46,45 @@ class AgentKnowledgeController extends Controller
 
                 $stream = fopen($pdfPath, 'r');
 
+                $uploadFilename = $extension === 'pdf'
+                    ? ($originalClientName !== '' ? $originalClientName : $sourceName)
+                    : ($originalBaseName !== '' ? $originalBaseName.'.pdf' : 'document.pdf');
+
+                Log::info('Uploading knowledge file to n8n.', [
+                    'agent_id' => $agent->id,
+                    'user_id' => $request->user()->id,
+                    'original_filename' => $originalClientName ?: $uploadedFile->getClientOriginalName(),
+                    'sent_filename' => $uploadFilename,
+                ]);
+
                 $response = Http::timeout(120)
-                    ->attach('file', $stream, basename($pdfPath))
+                    ->attach('file', $stream, $uploadFilename)
                     ->post(self::UPLOAD_ENDPOINT, [
                         'UserId' => (string) $request->user()->id,
                         'AgentId' => (string) $agent->id,
                     ]);
 
                 if ($response->failed()) {
+                    Log::warning('Knowledge upload failed.', [
+                        'agent_id' => $agent->id,
+                        'user_id' => $request->user()->id,
+                        'sent_filename' => $uploadFilename,
+                        'status' => $response->status(),
+                        'response_body' => $response->body(),
+                    ]);
+
                     return response()->json([
                         'message' => 'Unable to upload knowledge base file.',
                         'details' => $response->json(),
                     ], $response->status() ?: 500);
                 }
+
+                Log::info('Knowledge upload succeeded.', [
+                    'agent_id' => $agent->id,
+                    'user_id' => $request->user()->id,
+                    'sent_filename' => $uploadFilename,
+                    'status' => $response->status(),
+                ]);
             } finally {
                 if (is_resource($stream)) {
                     fclose($stream);
