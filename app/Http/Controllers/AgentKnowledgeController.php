@@ -5,8 +5,10 @@ namespace App\Http\Controllers;
 use App\Models\Agent;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use Symfony\Component\Process\Process;
 
@@ -18,51 +20,120 @@ class AgentKnowledgeController extends Controller
     {
         $this->ensureOwnership($request, $agent);
 
-        $validated = $request->validate([
-            'file' => ['required', 'file', 'mimes:pdf,docx,ppt,pptx', 'max:20480'],
-        ]);
+        $files = $this->gatherUploadedFiles($request);
 
-        $uploadedFile = $validated['file'];
-        $uuid = (string) Str::uuid();
-        $workingDir = "tmp/agent-knowledge/{$uuid}";
-        Storage::makeDirectory($workingDir);
+        $validated = Validator::make([
+            'files' => $files,
+        ], [
+            'files' => ['required', 'array', 'min:1', 'max:20'],
+            'files.*' => ['file', 'mimes:pdf,doc,docx,odt,ppt,pptx,odp', 'max:20480'],
+        ])->validate();
 
-        $extension = strtolower($uploadedFile->getClientOriginalExtension() ?: $uploadedFile->extension());
-        $sourceName = 'source.'.$extension;
-        $storedRelativePath = $uploadedFile->storeAs($workingDir, $sourceName);
-        $sourcePath = Storage::path($storedRelativePath);
+        $totalFiles = count($validated['files']);
 
-        try {
-            $pdfPath = $extension === 'pdf'
-                ? $sourcePath
-                : $this->convertToPdf($sourcePath);
+        foreach ($validated['files'] as $index => $uploadedFile) {
+            $uuid = (string) Str::uuid();
+            $workingDir = "tmp/agent-knowledge/{$uuid}";
+            Storage::makeDirectory($workingDir);
 
-            $stream = fopen($pdfPath, 'r');
+            $extension = strtolower($uploadedFile->getClientOriginalExtension() ?: $uploadedFile->extension());
+            $baseName = $totalFiles > 1
+                ? 'source'.($index + 1)
+                : 'source';
+            $sourceName = $baseName.'.'.$extension;
+            $storedRelativePath = $uploadedFile->storeAs($workingDir, $sourceName);
+            $sourcePath = Storage::path($storedRelativePath);
+            $stream = null;
 
-            $response = Http::timeout(120)
-                ->attach('file', $stream, basename($pdfPath))
-                ->post(self::UPLOAD_ENDPOINT, [
-                    'UserId' => (string) $request->user()->id,
-                    'AgentId' => (string) $agent->id,
-                ]);
+            try {
+                $pdfPath = $extension === 'pdf'
+                    ? $sourcePath
+                    : $this->convertToPdf($sourcePath);
 
-            if (is_resource($stream)) {
-                fclose($stream);
+                $stream = fopen($pdfPath, 'r');
+
+                $response = Http::timeout(120)
+                    ->attach('file', $stream, basename($pdfPath))
+                    ->post(self::UPLOAD_ENDPOINT, [
+                        'UserId' => (string) $request->user()->id,
+                        'AgentId' => (string) $agent->id,
+                    ]);
+
+                if ($response->failed()) {
+                    return response()->json([
+                        'message' => 'Unable to upload knowledge base file.',
+                        'details' => $response->json(),
+                    ], $response->status() ?: 500);
+                }
+            } finally {
+                if (is_resource($stream)) {
+                    fclose($stream);
+                }
+
+                Storage::deleteDirectory($workingDir);
             }
-
-            if ($response->failed()) {
-                return response()->json([
-                    'message' => 'Unable to upload knowledge base file.',
-                    'details' => $response->json(),
-                ], $response->status() ?: 500);
-            }
-
-            return response()->json([
-                'message' => 'Knowledge uploaded successfully.',
-            ]);
-        } finally {
-            Storage::deleteDirectory($workingDir);
         }
+
+        return response()->json([
+            'message' => 'Knowledge uploaded successfully.',
+        ]);
+    }
+
+    /**
+     * @param  array<int|string, UploadedFile|array|null>|UploadedFile|null  $files
+     * @return array<int, UploadedFile>
+     */
+    private function normalizeUploadedFiles(null|UploadedFile|array $files): array
+    {
+        if ($files === null) {
+            return [];
+        }
+
+        if ($files instanceof UploadedFile) {
+            return [$files];
+        }
+
+        $normalized = [];
+
+        foreach ($files as $file) {
+            if ($file instanceof UploadedFile) {
+                $normalized[] = $file;
+                continue;
+            }
+
+            if (is_array($file)) {
+                $normalized = array_merge($normalized, $this->normalizeUploadedFiles($file));
+            }
+        }
+
+        return array_values($normalized);
+    }
+
+    private function gatherUploadedFiles(Request $request): array
+    {
+        $candidates = [
+            $request->file('files'),
+            $request->file('file'),
+            data_get($request->allFiles(), 'files'),
+        ];
+
+        $collected = [];
+        $seen = [];
+
+        foreach ($candidates as $candidate) {
+            foreach ($this->normalizeUploadedFiles($candidate) as $file) {
+                $hash = spl_object_hash($file);
+
+                if (isset($seen[$hash])) {
+                    continue;
+                }
+
+                $seen[$hash] = true;
+                $collected[] = $file;
+            }
+        }
+
+        return $collected;
     }
 
     private function convertToPdf(string $sourcePath): string
