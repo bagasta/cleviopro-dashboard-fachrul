@@ -5,8 +5,10 @@ namespace App\Http\Controllers;
 use App\Models\Agent;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use Symfony\Component\Process\Process;
 
@@ -18,10 +20,12 @@ class AgentKnowledgeController extends Controller
     {
         $this->ensureOwnership($request, $agent);
 
-        $validated = $request->validate([
-            'files' => ['required', 'array', 'max:20'],
+        $validated = Validator::make([
+            'files' => $this->normalizeUploadedFiles($request->file('files')),
+        ], [
+            'files' => ['required', 'array', 'min:1', 'max:20'],
             'files.*' => ['file', 'mimes:pdf,doc,docx,odt,ppt,pptx,odp', 'max:20480'],
-        ]);
+        ])->validate();
 
         foreach ($validated['files'] as $uploadedFile) {
             $uuid = (string) Str::uuid();
@@ -66,6 +70,23 @@ class AgentKnowledgeController extends Controller
         return response()->json([
             'message' => 'Knowledge uploaded successfully.',
         ]);
+    }
+
+    /**
+     * @param  array<int, UploadedFile|null>|UploadedFile|null  $files
+     * @return array<int, UploadedFile>
+     */
+    private function normalizeUploadedFiles(null|UploadedFile|array $files): array
+    {
+        if ($files === null) {
+            return [];
+        }
+
+        if (! is_array($files)) {
+            $files = [$files];
+        }
+
+        return array_values(array_filter($files, static fn ($file) => $file instanceof UploadedFile));
     }
 
     private function convertToPdf(string $sourcePath): string
