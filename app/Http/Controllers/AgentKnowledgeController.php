@@ -5,6 +5,8 @@ namespace App\Http\Controllers;
 use App\Models\Agent;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
@@ -19,12 +21,9 @@ class AgentKnowledgeController extends Controller
     {
         $this->ensureOwnership($request, $agent);
 
-        $validated = $request->validate([
-            'files' => ['required', 'array', 'max:20'],
-            'files.*' => ['file', 'mimes:pdf,doc,docx,odt,ppt,pptx,odp', 'max:20480'],
-        ]);
+        $files = $this->validatedUploads($request);
 
-        foreach ($validated['files'] as $uploadedFile) {
+        foreach ($files as $uploadedFile) {
             $uuid = (string) Str::uuid();
             $workingDir = "tmp/agent-knowledge/{$uuid}";
             Storage::makeDirectory($workingDir);
@@ -97,6 +96,59 @@ class AgentKnowledgeController extends Controller
         return response()->json([
             'message' => 'Knowledge uploaded successfully.',
         ]);
+    }
+
+    /**
+     * @return UploadedFile[]
+     */
+    private function validatedUploads(Request $request): array
+    {
+        $files = $this->normalizeUploadedFiles($request);
+
+        return validator(
+            ['files' => $files],
+            [
+                'files' => ['required', 'array', 'max:20'],
+                'files.*' => ['file', 'mimes:pdf,doc,docx,odt,ppt,pptx,odp', 'max:20480'],
+            ]
+        )->validate()['files'];
+    }
+
+    /**
+     * @return UploadedFile[]
+     */
+    private function normalizeUploadedFiles(Request $request): array
+    {
+        $allFiles = $request->allFiles();
+        $files = $allFiles['files'] ?? null;
+
+        if ($files === null) {
+            $files = $request->file('file');
+        }
+
+        return $this->flattenFiles($files);
+    }
+
+    /**
+     * @param  array<int|string, mixed>|UploadedFile|null  $files
+     * @return UploadedFile[]
+     */
+    private function flattenFiles($files): array
+    {
+        $normalized = [];
+
+        foreach (Arr::wrap($files) as $file) {
+            if ($file instanceof UploadedFile) {
+                $normalized[] = $file;
+                continue;
+            }
+
+            if (is_array($file)) {
+                $normalized = array_merge($normalized, $this->flattenFiles($file));
+            }
+        }
+
+        return $normalized;
     }
 
     private function convertToPdf(string $sourcePath): string
