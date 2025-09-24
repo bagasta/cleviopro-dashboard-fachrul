@@ -11,8 +11,6 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use Symfony\Component\Process\Process;
-use Illuminate\Support\Facades\Log;
-
 
 class AgentKnowledgeController extends Controller
 {
@@ -23,6 +21,7 @@ class AgentKnowledgeController extends Controller
         $this->ensureOwnership($request, $agent);
 
         $files = $this->gatherUploadedFiles($request);
+        $shouldNumberFiles = count($files) > 1;
 
         $validated = Validator::make([
             'files' => $files,
@@ -31,41 +30,46 @@ class AgentKnowledgeController extends Controller
             'files.*' => ['file', 'mimes:pdf,doc,docx,odt,ppt,pptx,odp', 'max:20480'],
         ])->validate();
 
-        $totalFiles = count($validated['files']);
+        $normalizedFiles = array_values($validated['files']);
 
-        foreach ($validated['files'] as $index => $uploadedFile) {
+        foreach ($normalizedFiles as $index => $uploadedFile) {
             $uuid = (string) Str::uuid();
             $workingDir = "tmp/agent-knowledge/{$uuid}";
             Storage::makeDirectory($workingDir);
 
             $extension = strtolower($uploadedFile->getClientOriginalExtension() ?: $uploadedFile->extension());
-            $baseName = $totalFiles > 1
+            $baseName = $shouldNumberFiles
                 ? 'source'.($index + 1)
                 : 'source';
             $sourceName = $baseName.'.'.$extension;
             $storedRelativePath = $uploadedFile->storeAs($workingDir, $sourceName);
             $sourcePath = Storage::path($storedRelativePath);
-            $stream = null;
+            $finalPdfName = $baseName.'.pdf';
+            $finalPdfPath = dirname($sourcePath).DIRECTORY_SEPARATOR.$finalPdfName;
 
             try {
                 $pdfPath = $extension === 'pdf'
-                    ? $sourcePath
-                    : $this->convertToPdf($sourcePath);
+                    ? $this->ensurePdfName($sourcePath, $finalPdfPath)
+                    : $this->convertToPdf($sourcePath, $finalPdfPath);
 
                 $stream = fopen($pdfPath, 'r');
 
-                $response = Http::timeout(120)
-                    ->attach('file', $stream, basename($pdfPath))
-                    ->post(self::UPLOAD_ENDPOINT, [
-                        'UserId' => (string) $request->user()->id,
-                        'AgentId' => (string) $agent->id,
-                    ]);
-                    \Log::info('n8n upload', [
-                    'index' => $index + 1,
-                    'sent'  => basename($pdfPath),
-                    'status'=> $response->status(),
-                    'ok'    => $response->ok(),
-                ]);
+                if ($stream === false) {
+                    throw new \RuntimeException('Unable to open the PDF file for uploading.');
+                }
+
+                try {
+                    $response = Http::timeout(120)
+                        ->attach('file', $stream, $finalPdfName)
+                        ->post(self::UPLOAD_ENDPOINT, [
+                            'UserId' => (string) $request->user()->id,
+                            'AgentId' => (string) $agent->id,
+                        ]);
+                } finally {
+                    if (is_resource($stream)) {
+                        fclose($stream);
+                    }
+                }
 
                 if ($response->failed()) {
                     return response()->json([
@@ -74,10 +78,6 @@ class AgentKnowledgeController extends Controller
                     ], $response->status() ?: 500);
                 }
             } finally {
-                if (is_resource($stream)) {
-                    fclose($stream);
-                }
-
                 Storage::deleteDirectory($workingDir);
             }
         }
@@ -144,7 +144,20 @@ class AgentKnowledgeController extends Controller
         return $collected;
     }
 
-    private function convertToPdf(string $sourcePath): string
+    private function ensurePdfName(string $sourcePath, string $desiredPdfPath): string
+    {
+        if (basename($sourcePath) === basename($desiredPdfPath)) {
+            return $sourcePath;
+        }
+
+        if (! rename($sourcePath, $desiredPdfPath)) {
+            throw new \RuntimeException('Unable to rename the uploaded PDF file.');
+        }
+
+        return $desiredPdfPath;
+    }
+
+    private function convertToPdf(string $sourcePath, string $desiredPdfPath): string
     {
         $outputDir = dirname($sourcePath);
         $binary = $this->resolveLibreOfficeBinary();
@@ -179,7 +192,12 @@ class AgentKnowledgeController extends Controller
             throw new \RuntimeException('Converted PDF file could not be located.');
         }
 
-        return $pdfPath;
+        if (basename($pdfPath) !== basename($desiredPdfPath) && ! rename($pdfPath, $desiredPdfPath)) {
+            throw new \RuntimeException('Unable to rename the converted PDF file.');
+        }
+
+        return $desiredPdfPath;
+
     }
 
     private function resolveLibreOfficeBinary(): string
