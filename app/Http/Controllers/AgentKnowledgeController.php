@@ -11,10 +11,12 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Symfony\Component\Process\Process;
 
 class AgentKnowledgeController extends Controller
 {
     private const UPLOAD_ENDPOINT = 'https://n8n-new.chiefaiofficer.id/webhook/Upload';
+
     public function store(Request $request, Agent $agent): JsonResponse
     {
         $this->ensureOwnership($request, $agent);
@@ -34,18 +36,17 @@ class AgentKnowledgeController extends Controller
                 $originalBaseName = pathinfo($originalClientName, PATHINFO_FILENAME) ?: 'document';
                 $normalizedBaseName = Str::slug($originalBaseName) ?: 'document';
 
-                $sourceName = $normalizedBaseName . '.' . $extension;
+                $sourceName = $normalizedBaseName.'.'.$extension;
                 $storedRelativePath = $uploadedFile->storeAs($workingDir, $sourceName);
                 $sourcePath = Storage::path($storedRelativePath);
 
-                // === GANTI: konversi via CloudConvert, bukan LibreOffice ===
                 $pdfPath = $extension === 'pdf'
                     ? $sourcePath
-                    : $this->convertToPdfViaCloudConvert($sourcePath);
+                    : $this->convertToPdf($sourcePath);
 
                 $uploadFilename = $extension === 'pdf'
                     ? ($originalClientName !== '' ? $originalClientName : $sourceName)
-                    : ($originalBaseName !== '' ? $originalBaseName . '.pdf' : 'document.pdf');
+                    : ($originalBaseName !== '' ? $originalBaseName.'.pdf' : 'document.pdf');
 
                 $preparedFiles[] = [
                     'original_filename' => $originalClientName !== '' ? $originalClientName : $uploadedFile->getClientOriginalName(),
@@ -55,6 +56,7 @@ class AgentKnowledgeController extends Controller
                 ];
             } catch (\Throwable $exception) {
                 Storage::deleteDirectory($workingDir);
+
                 throw $exception;
             }
         }
@@ -64,7 +66,6 @@ class AgentKnowledgeController extends Controller
         try {
             $pendingRequest = Http::timeout(120);
             $idx = 1;
-
             foreach ($preparedFiles as $fileMeta) {
                 $stream = fopen($fileMeta['pdf_path'], 'r');
                 if ($stream === false) {
@@ -72,9 +73,8 @@ class AgentKnowledgeController extends Controller
                 }
                 $streams[] = $stream;
 
-                // Gunakan nama unik per part agar n8n tidak menimpa
                 $pendingRequest = $pendingRequest->attach(
-                    "file{$idx}",
+                    "file{$idx}",              // file1, file2, ...
                     $stream,
                     $fileMeta['sent_filename']
                 );
@@ -141,142 +141,6 @@ class AgentKnowledgeController extends Controller
     }
 
     /**
-     * Konversi dokumen ke PDF via CloudConvert
-     *
-     * @throws \RuntimeException
-     */
-    private function convertToPdfViaCloudConvert(string $sourcePath): string
-    {
-        $apiBase = 'https://api.cloudconvert.com/v2';
-        $token = env('CLOUDCONVERT_API_KEY');
-
-        $outputDir = dirname($sourcePath);
-        $baseName = pathinfo($sourcePath, PATHINFO_FILENAME);
-        $inputExt = strtolower(pathinfo($sourcePath, PATHINFO_EXTENSION));
-
-        // Buat job: import(upload) -> convert -> export(url)
-        $createJobResp = Http::withToken($token)
-            ->acceptJson()
-            ->post($apiBase . '/jobs', [
-                'tasks' => [
-                    'import-1' => [
-                        'operation' => 'import/upload',
-                    ],
-                    'convert-1' => [
-                        'operation' => 'convert',
-                        'input' => ['import-1'],
-                        'output_format' => 'pdf',
-                        // Optional tuning:
-                        // 'filename' => $baseName . '.pdf',
-                    ],
-                    'export-1' => [
-                        'operation' => 'export/url',
-                        'input' => ['convert-1'],
-                    ],
-                ],
-            ]);
-
-        if ($createJobResp->failed()) {
-            throw new \RuntimeException('CloudConvert: failed to create job. ' . $createJobResp->body());
-        }
-
-        $job = $createJobResp->json('data');
-        if (!$job) {
-            throw new \RuntimeException('CloudConvert: invalid job response.');
-        }
-
-        // Ambil info upload form dari task import-1
-        $importTask = collect($job['tasks'] ?? [])->firstWhere('name', 'import-1');
-        if (!$importTask || empty($importTask['result']['form']['url']) || empty($importTask['result']['form']['parameters'])) {
-            throw new \RuntimeException('CloudConvert: upload form not available.');
-        }
-
-        $uploadUrl = $importTask['result']['form']['url'];
-        $uploadParams = $importTask['result']['form']['parameters'];
-
-        // Upload file sumber ke CloudConvert (multipart, field "file")
-        $uploadFileResp = Http::asMultipart()
-            ->timeout(120)
-            ->post($uploadUrl, array_merge(
-                // form fields harus dikirim sebelum file
-                collect($uploadParams)->map(function ($v, $k) {
-                    return ['name' => $k, 'contents' => (string) $v];
-                })->values()->all(),
-                [
-                    [
-                        'name' => 'file',
-                        'contents' => fopen($sourcePath, 'r'),
-                        'filename' => basename($sourcePath),
-                    ],
-                ]
-            ));
-
-        if ($uploadFileResp->failed()) {
-            throw new \RuntimeException('CloudConvert: upload file failed. ' . $uploadFileResp->body());
-        }
-
-        // Poll job sampai selesai
-        $jobId = $job['id'] ?? null;
-        if (!$jobId) {
-            throw new \RuntimeException('CloudConvert: job id missing.');
-        }
-
-        $maxWaitSeconds = 60; // sesuaikan kebutuhan
-        $sleepSeconds = 2;
-        $elapsed = 0;
-        $lastStatus = null;
-
-        do {
-            sleep($sleepSeconds);
-            $elapsed += $sleepSeconds;
-
-            $statusResp = Http::withToken($token)->get($apiBase . '/jobs/' . $jobId);
-            if ($statusResp->failed()) {
-                throw new \RuntimeException('CloudConvert: failed to fetch job status. ' . $statusResp->body());
-            }
-
-            $jobData = $statusResp->json('data');
-            $lastStatus = $jobData['status'] ?? null;
-
-            if ($lastStatus === 'finished') {
-                // Ambil file URL dari export-1
-                $exportTask = collect($jobData['tasks'] ?? [])->firstWhere('name', 'export-1');
-                $files = $exportTask['result']['files'] ?? [];
-
-                if (empty($files) || empty($files[0]['url'])) {
-                    throw new \RuntimeException('CloudConvert: export URL not found.');
-                }
-
-                $downloadUrl = $files[0]['url'];
-
-                // Download hasil PDF ke outputDir
-                $pdfPath = $outputDir . '/' . $baseName . '.pdf';
-                $download = Http::timeout(120)->get($downloadUrl);
-
-                if ($download->failed()) {
-                    throw new \RuntimeException('CloudConvert: failed to download converted PDF.');
-                }
-
-                file_put_contents($pdfPath, $download->body());
-
-                if (!file_exists($pdfPath)) {
-                    throw new \RuntimeException('Converted PDF file could not be located.');
-                }
-
-                return $pdfPath;
-            }
-
-            if ($lastStatus === 'error' || $lastStatus === 'failed') {
-                $failedTask = collect($jobData['tasks'] ?? [])->firstWhere('status', 'error');
-                $reason = $failedTask['message'] ?? 'Unknown error';
-                throw new \RuntimeException('CloudConvert job failed: ' . $reason);
-            }
-        } while ($elapsed < $maxWaitSeconds);
-
-        throw new \RuntimeException('CloudConvert: job timeout waiting for conversion to finish. Last status: ' . ($lastStatus ?? 'unknown'));
-    }
-
-    /**
      * @return UploadedFile[]
      */
     private function validatedUploads(Request $request): array
@@ -327,6 +191,88 @@ class AgentKnowledgeController extends Controller
         }
 
         return $normalized;
+    }
+
+    private function convertToPdf(string $sourcePath): string
+    {
+        $outputDir = dirname($sourcePath);
+        $binary = $this->resolveLibreOfficeBinary();
+
+        $process = new Process([
+            $binary,
+            '--headless',
+            '--convert-to', 'pdf',
+            '--outdir', $outputDir,
+            $sourcePath,
+        ]);
+
+        $process->setTimeout(120);
+        try {
+            $process->run();
+        } catch (\Throwable $exception) {
+            throw new \RuntimeException('Unable to run LibreOffice for PDF conversion. '.($exception->getMessage() ?: 'Unknown error.'), 0, $exception);
+        }
+
+        if (! $process->isSuccessful()) {
+            $errorOutput = trim($process->getErrorOutput() ?: $process->getOutput());
+            $message = $errorOutput !== ''
+                ? sprintf('LibreOffice failed to convert the document: %s', $errorOutput)
+                : 'LibreOffice failed to convert the document to PDF. Ensure LibreOffice is installed and reachable.';
+
+            throw new \RuntimeException($message);
+        }
+
+        $pdfPath = $outputDir.'/'.pathinfo($sourcePath, PATHINFO_FILENAME).'.pdf';
+
+        if (! file_exists($pdfPath)) {
+            throw new \RuntimeException('Converted PDF file could not be located.');
+        }
+
+        return $pdfPath;
+    }
+
+    private function resolveLibreOfficeBinary(): string
+    {
+        $candidates = array_filter([
+            env('LIBREOFFICE_BINARY'),
+            env('SOFFICE_PATH'),
+        ]);
+
+        if (PHP_OS_FAMILY === 'Windows') {
+            $candidates[] = 'C:\\Program Files\\LibreOffice\\program\\soffice.exe';
+            $candidates[] = 'C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe';
+        } else {
+            $candidates[] = '/usr/bin/soffice';
+            $candidates[] = '/usr/local/bin/soffice';
+            $candidates[] = '/snap/bin/libreoffice';
+        }
+
+        $candidates[] = 'soffice';
+        $candidates[] = 'libreoffice';
+
+        foreach ($candidates as $candidate) {
+            if ($this->isCommandAvailable($candidate)) {
+                return $candidate;
+            }
+        }
+
+        throw new \RuntimeException('LibreOffice executable was not found. Install LibreOffice or set the LIBREOFFICE_BINARY environment variable with the full path to soffice.');
+    }
+
+    private function isCommandAvailable(string $command): bool
+    {
+        if (str_contains($command, DIRECTORY_SEPARATOR)) {
+            return is_file($command);
+        }
+
+        $process = PHP_OS_FAMILY === 'Windows'
+            ? new Process(['where', $command])
+            : new Process(['which', $command]);
+
+        $process->setTimeout(120);
+        $process->run();
+
+        return $process->isSuccessful();
     }
 
     private function ensureOwnership(Request $request, Agent $agent): void
