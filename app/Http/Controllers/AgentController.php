@@ -11,10 +11,69 @@ use Illuminate\Support\Facades\Log;
 
 class AgentController extends Controller
 {
+    private const TOOL_ALIAS_MAP = [
+        'google_gmail' => [
+            'gmail',
+            'google_gmail',
+            'gmail_search',
+            'gmail_send_message',
+            'gmail_read_messages',
+            'gmail_get_message',
+            'gmail_read',
+            'gmail_read_inbox',
+            'gmail_get',
+            'gmail_message',
+            'send_email',
+            'email_send',
+        ],
+        'websearch' => [
+            'websearch',
+            'web_search',
+            'web search',
+        ],
+        'spreadsheet' => [
+            'spreadsheet',
+        ],
+        'google_docs' => [
+            'google_docs',
+            'docs',
+            'docs_create',
+            'docs_get',
+            'docs_append',
+            'docs_export_pdf',
+        ],
+        'google_calendar' => [
+            'calendar',
+            'google_calendar',
+            'create_calendar_event',
+            'list_calendar_events',
+            'get_calendar_event',
+            'update_calendar_event',
+            'delete_calendar_event',
+            'search_calendar_events',
+            'get_free_busy',
+            'list_calendars',
+        ],
+        'google_maps' => [
+            'google_maps',
+            'maps',
+            'maps_api',
+            'maps_geocode',
+            'maps_directions',
+            'maps_distance_matrix',
+            'maps_nearby',
+        ],
+        'calculator' => [
+            'calculator',
+            'calc',
+            'calc_service',
+        ],
+    ];
+
     private const AVAILABLE_TOOL_OPTIONS = [
-        'calc' => 'Calculator',
-        'docs' => 'Google Docs',
-        'gmaps' => 'Google Maps',
+        'google_docs' => 'Google Docs',
+        'google_maps' => 'Google Maps',
+        'calculator' => 'Calculator',
         'websearch' => 'Web Search',
     ];
 
@@ -108,12 +167,28 @@ class AgentController extends Controller
     private function selectedToolKeys(array $tools): array
     {
         $selected = [];
+        $normalizedTools = $this->buildNormalizedLookup($tools);
 
-        foreach ($tools as $tool) {
-            $normalized = strtolower($tool);
+        foreach (self::TOOL_ALIAS_MAP as $key => $aliases) {
+            if (! array_key_exists($key, self::AVAILABLE_TOOL_OPTIONS)) {
+                continue;
+            }
 
-            if (array_key_exists($normalized, self::AVAILABLE_TOOL_OPTIONS)) {
-                $selected[] = $normalized;
+            foreach ($aliases as $alias) {
+                if (isset($normalizedTools[$this->normalizeToolKey($alias)])) {
+                    $selected[] = $key;
+                    break;
+                }
+            }
+        }
+
+        $legacyMap = [
+            'gmaps' => 'google_maps',
+        ];
+
+        foreach ($legacyMap as $legacyKey => $targetKey) {
+            if (isset($normalizedTools[$legacyKey]) && array_key_exists($targetKey, self::AVAILABLE_TOOL_OPTIONS)) {
+                $selected[] = $targetKey;
             }
         }
 
@@ -122,8 +197,11 @@ class AgentController extends Controller
 
     private function hasGmailIntegration(array $tools): bool
     {
-        foreach ($tools as $tool) {
-            if (stripos($tool, 'gmail') !== false) {
+        $normalizedTools = $this->buildNormalizedLookup($tools);
+        $gmailAliases = self::TOOL_ALIAS_MAP['google_gmail'] ?? [];
+
+        foreach ($gmailAliases as $alias) {
+            if (isset($normalizedTools[$this->normalizeToolKey($alias)])) {
                 return true;
             }
         }
@@ -133,15 +211,18 @@ class AgentController extends Controller
 
     private function preservedTools(array $tools): array
     {
+        $dictionaryLookup = $this->dictionaryAliasLookup();
         $preserved = [];
+        $seen = [];
 
         foreach ($tools as $tool) {
-            $normalized = strtolower($tool);
+            $normalized = $this->normalizeToolKey($tool);
 
-            if (array_key_exists($normalized, self::AVAILABLE_TOOL_OPTIONS)) {
+            if ($normalized === '' || isset($dictionaryLookup[$normalized]) || isset($seen[$normalized])) {
                 continue;
             }
 
+            $seen[$normalized] = true;
             $preserved[] = $tool;
         }
 
@@ -150,8 +231,36 @@ class AgentController extends Controller
 
     private function encodeTools(array $selectedTools, array $preservedTools): ?string
     {
-        $selected = array_values(array_unique(array_map('strval', $selectedTools)));
-        $payload = array_merge($preservedTools, $selected);
+        $payload = [];
+        $seen = [];
+
+        $append = static function (string $value) use (&$payload, &$seen): void {
+            $normalized = self::normalizeStaticToolKey($value);
+
+            if ($normalized === '' || isset($seen[$normalized])) {
+                return;
+            }
+
+            $seen[$normalized] = true;
+            $payload[] = $value;
+        };
+
+        foreach ($selectedTools as $toolKey) {
+            $aliases = self::TOOL_ALIAS_MAP[$toolKey] ?? [];
+
+            if (empty($aliases)) {
+                $append((string) $toolKey);
+                continue;
+            }
+
+            foreach ($aliases as $alias) {
+                $append($alias);
+            }
+        }
+
+        foreach ($preservedTools as $tool) {
+            $append($tool);
+        }
 
         if (empty($payload)) {
             return null;
@@ -160,10 +269,57 @@ class AgentController extends Controller
         return json_encode($payload);
     }
 
+    private function buildNormalizedLookup(array $tools): array
+    {
+        $lookup = [];
+
+        foreach ($tools as $tool) {
+            $normalized = $this->normalizeToolKey($tool);
+
+            if ($normalized !== '') {
+                $lookup[$normalized] = true;
+            }
+        }
+
+        return $lookup;
+    }
+
+    private function dictionaryAliasLookup(): array
+    {
+        $lookup = [];
+
+        foreach (self::TOOL_ALIAS_MAP as $aliases) {
+            foreach ($aliases as $alias) {
+                $normalized = $this->normalizeToolKey($alias);
+
+                if ($normalized !== '') {
+                    $lookup[$normalized] = true;
+                }
+            }
+        }
+
+        return $lookup;
+    }
+
+    private function normalizeToolKey(string $value): string
+    {
+        return self::normalizeStaticToolKey($value);
+    }
+
+    private static function normalizeStaticToolKey(string $value): string
+    {
+        $value = preg_replace('/(?<!^)[A-Z]/', '_$0', $value);
+        $value = str_replace(['-', ' '], '_', $value);
+        $value = strtolower($value ?? '');
+        $value = preg_replace('/_+/', '_', $value);
+
+        return trim((string) $value, '_');
+    }
+
     private function warmAgentSilently(int $agentId, int $userId): void
     {
         try {
-            Http::timeout(3)          // kecil agar view tidak nunggu lama
+            Http::timeout(10)          // kecil agar view tidak nunggu lama
                 ->asJson()
                 // ->withToken(config('services.langchain.token')) // aktifkan jika endpoint butuh auth
                 ->post("https://langchain.chiefaiofficer.id/agents/{$agentId}/warm", [

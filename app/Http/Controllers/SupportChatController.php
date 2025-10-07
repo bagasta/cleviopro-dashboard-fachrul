@@ -24,7 +24,7 @@ class SupportChatController extends Controller
             'message' => $validated['message'],
         ];
 
-        $response = Http::timeout(30)->post(self::CHAT_ENDPOINT, $payload);
+        $response = Http::timeout(120)->post(self::CHAT_ENDPOINT, $payload);
 
         if ($response->failed()) {
             return response()->json([

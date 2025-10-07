@@ -68,7 +68,7 @@ class AgentTrialController extends Controller
             'rag_enable' => true,
         ];
 
-        $response = Http::timeout(60)
+        $response = Http::timeout(120)
             ->withHeaders([
                 'Content-Type' => 'application/json',
                 'Authorization' => 'Bearer '.$apiKey->key_hash,

@@ -38,5 +38,9 @@ return [
         'key' => env('OPENAI_API_KEY'),
     ],
     
+    'cloudconvert' => [
+    'key' => env('CLOUDCONVERT_API_KEY'),
+    ],
+    
 
 ];
