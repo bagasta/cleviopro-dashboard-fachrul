@@ -5,7 +5,10 @@ namespace App\Http\Controllers;
 use App\Models\Agent;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Symfony\Component\Process\Process;
@@ -18,54 +21,177 @@ class AgentKnowledgeController extends Controller
     {
         $this->ensureOwnership($request, $agent);
 
-        $validated = $request->validate([
-            'files' => ['required', 'array', 'max:20'],
-            'files.*' => ['file', 'mimes:pdf,doc,docx,odt,ppt,pptx,odp', 'max:20480'],
-        ]);
+        $files = $this->validatedUploads($request);
 
-        foreach ($validated['files'] as $uploadedFile) {
+        $preparedFiles = [];
+
+        foreach ($files as $uploadedFile) {
             $uuid = (string) Str::uuid();
             $workingDir = "tmp/agent-knowledge/{$uuid}";
             Storage::makeDirectory($workingDir);
 
-            $extension = strtolower($uploadedFile->getClientOriginalExtension() ?: $uploadedFile->extension());
-            $sourceName = 'source.'.$extension;
-            $storedRelativePath = $uploadedFile->storeAs($workingDir, $sourceName);
-            $sourcePath = Storage::path($storedRelativePath);
-            $stream = null;
-
             try {
+                $extension = strtolower($uploadedFile->getClientOriginalExtension() ?: $uploadedFile->extension());
+                $originalClientName = trim($uploadedFile->getClientOriginalName());
+                $originalBaseName = pathinfo($originalClientName, PATHINFO_FILENAME) ?: 'document';
+                $normalizedBaseName = Str::slug($originalBaseName) ?: 'document';
+
+                $sourceName = $normalizedBaseName.'.'.$extension;
+                $storedRelativePath = $uploadedFile->storeAs($workingDir, $sourceName);
+                $sourcePath = Storage::path($storedRelativePath);
+
                 $pdfPath = $extension === 'pdf'
                     ? $sourcePath
                     : $this->convertToPdf($sourcePath);
 
-                $stream = fopen($pdfPath, 'r');
+                $uploadFilename = $extension === 'pdf'
+                    ? ($originalClientName !== '' ? $originalClientName : $sourceName)
+                    : ($originalBaseName !== '' ? $originalBaseName.'.pdf' : 'document.pdf');
 
-                $response = Http::timeout(120)
-                    ->attach('file', $stream, basename($pdfPath))
-                    ->post(self::UPLOAD_ENDPOINT, [
-                        'UserId' => (string) $request->user()->id,
-                        'AgentId' => (string) $agent->id,
-                    ]);
+                $preparedFiles[] = [
+                    'original_filename' => $originalClientName !== '' ? $originalClientName : $uploadedFile->getClientOriginalName(),
+                    'sent_filename' => $uploadFilename,
+                    'pdf_path' => $pdfPath,
+                    'working_dir' => $workingDir,
+                ];
+            } catch (\Throwable $exception) {
+                Storage::deleteDirectory($workingDir);
 
-                if ($response->failed()) {
-                    return response()->json([
-                        'message' => 'Unable to upload knowledge base file.',
-                        'details' => $response->json(),
-                    ], $response->status() ?: 500);
+                throw $exception;
+            }
+        }
+
+        $streams = [];
+
+        try {
+            $pendingRequest = Http::timeout(120);
+
+            foreach ($preparedFiles as $index => $fileMeta) {
+                $stream = fopen($fileMeta['pdf_path'], 'r');
+
+                if ($stream === false) {
+                    throw new \RuntimeException(sprintf('Unable to open file stream for %s.', $fileMeta['pdf_path']));
                 }
-            } finally {
+
+                $streams[] = $stream;
+
+                $pendingRequest = $pendingRequest->attach(
+                    sprintf('files[%d]', $index),
+                    $stream,
+                    $fileMeta['sent_filename']
+                );
+            }
+
+            $filesPayload = array_map(static function (array $fileMeta): array {
+                return [
+                    'original_filename' => $fileMeta['original_filename'],
+                    'sent_filename' => $fileMeta['sent_filename'],
+                ];
+            }, $preparedFiles);
+
+            Log::info('Uploading knowledge files to n8n.', [
+                'agent_id' => $agent->id,
+                'user_id' => $request->user()->id,
+                'file_count' => count($filesPayload),
+                'files' => $filesPayload,
+            ]);
+
+            $response = $pendingRequest->post(self::UPLOAD_ENDPOINT, [
+                'UserId' => (string) $request->user()->id,
+                'AgentId' => (string) $agent->id,
+            ]);
+
+            if ($response->failed()) {
+                Log::warning('Knowledge upload failed.', [
+                    'agent_id' => $agent->id,
+                    'user_id' => $request->user()->id,
+                    'file_count' => count($filesPayload),
+                    'files' => $filesPayload,
+                    'status' => $response->status(),
+                    'response_body' => $response->body(),
+                ]);
+
+                return response()->json([
+                    'message' => 'Unable to upload knowledge base file.',
+                    'details' => $response->json(),
+                ], $response->status() ?: 500);
+            }
+
+            Log::info('Knowledge upload succeeded.', [
+                'agent_id' => $agent->id,
+                'user_id' => $request->user()->id,
+                'file_count' => count($filesPayload),
+                'files' => $filesPayload,
+                'status' => $response->status(),
+            ]);
+        } finally {
+            foreach ($streams as $stream) {
                 if (is_resource($stream)) {
                     fclose($stream);
                 }
+            }
 
-                Storage::deleteDirectory($workingDir);
+            foreach ($preparedFiles as $fileMeta) {
+                Storage::deleteDirectory($fileMeta['working_dir']);
             }
         }
 
         return response()->json([
             'message' => 'Knowledge uploaded successfully.',
         ]);
+    }
+
+    /**
+     * @return UploadedFile[]
+     */
+    private function validatedUploads(Request $request): array
+    {
+        $files = $this->normalizeUploadedFiles($request);
+
+        return validator(
+            ['files' => $files],
+            [
+                'files' => ['required', 'array', 'max:20'],
+                'files.*' => ['file', 'mimes:pdf,doc,docx,odt,ppt,pptx,odp', 'max:20480'],
+            ]
+        )->validate()['files'];
+    }
+
+    /**
+     * @return UploadedFile[]
+     */
+    private function normalizeUploadedFiles(Request $request): array
+    {
+        $allFiles = $request->allFiles();
+        $files = $allFiles['files'] ?? null;
+
+        if ($files === null) {
+            $files = $request->file('file');
+        }
+
+        return $this->flattenFiles($files);
+    }
+
+    /**
+     * @param  array<int|string, mixed>|UploadedFile|null  $files
+     * @return UploadedFile[]
+     */
+    private function flattenFiles($files): array
+    {
+        $normalized = [];
+
+        foreach (Arr::wrap($files) as $file) {
+            if ($file instanceof UploadedFile) {
+                $normalized[] = $file;
+                continue;
+            }
+
+            if (is_array($file)) {
+                $normalized = array_merge($normalized, $this->flattenFiles($file));
+            }
+        }
+
+        return $normalized;
     }
 
     private function convertToPdf(string $sourcePath): string
